@@ -1,0 +1,1 @@
+{"Modules":[{"Key":"","Source":"","Dir":"."},{"Key":"firewall","Source":"./firewall.tf","Dir":"firewall.tf"},{"Key":"vpc","Source":"./vpc.tf","Dir":"vpc.tf"}]}
