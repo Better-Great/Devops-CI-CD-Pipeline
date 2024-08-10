@@ -1,0 +1,151 @@
+pipeline {
+    agent any
+    
+    tools {
+        jdk 'jdk17'
+        maven 'maven3'
+    }
+    
+    environment {
+        SCANNER_HOME = tool 'sonar-scanner'
+    }
+    stages {
+        stage('Git Checkout') {
+            steps {
+                git branch: 'main', credentialsId: 'git-credentials', url: 'https://github.com/Better-Great/Devops-CI-CD-Pipeline.git'
+            }
+        }
+        
+        stage('Compile') {
+            steps {
+                sh "mvn compile"
+            }
+        }
+        
+        stage('Test') {
+            steps {
+                sh "mvn test -DskipTests=true"
+            }
+        }
+        
+        stage('Trivy Scan File System') {
+            steps {
+                sh "trivy fs --format table -o trivy-fs-report.html ."
+            }
+        }
+        
+        stage('SonarQube Analysis') {
+            steps {
+                retry(3) {
+                    withSonarQubeEnv('sonar') {
+                        sh '''$SCANNER_HOME/bin/sonar-scanner -X -Dsonar.projectKey=Devops-CI-CD-Pipeline -Dsonar.projectName=Devops-CI-CD-Pipeline -Dsonar.java.binaries=.'''
+                     }
+                }
+             }
+        }
+        
+        stage('Build') {
+            steps {
+                sh "mvn package -DskipTests=true"
+            }
+        }
+        
+        stage('Deploy Artifacts to Nexus') {
+            steps {
+                withMaven(globalMavenSettingsConfig: 'maven-setting', jdk: 'jdk17', maven: 'maven3', mavenSettingsConfig: '', traceability: true) {
+                    sh "mvn deploy -DskipTests=true"
+                }
+            }
+        }
+        
+        stage('Build & Tag Docker Images') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker-credentials', toolName: 'docker') {
+                        sh "docker build -t bettergreat/mission:latest ."
+                    }
+                }
+            }
+        }
+        
+        stage('Trivy Scan Docker Image') {
+            steps {
+                sh "trivy image --format table -o trivy-image-report.html bettergreat/mission:latest"
+            }
+        }
+        
+        stage('Deploy to container') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker-credentials', toolName: 'docker') {
+                        sh "docker rm -f \$(docker ps -aq -f name=bettergreat/mission) || true"
+                        sh "docker run -d -p 8084:8080 bettergreat/mission:latest"
+                    }
+                }
+            }
+        }
+        
+        stage('Publish Docker Images') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker-credentials', toolName: 'docker') {
+                        sh "docker push bettergreat/mission:latest"
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy to k8s') {
+            steps {
+                withKubeConfig(caCertificate: '', clusterName: 'do-nyc3-devops-cluster', contextName: '', credentialsId: 'k8-token', namespace: 'webapps', restrictKubeConfigAccess: false, serverUrl: 'https://f586c167-8b01-4eee-ada1-8c7ef0d46e6b.k8s.ondigitalocean.com') {
+                    sh "kubectl apply -f ds.yml -n webapps"
+                    sleep 60 
+                }
+            }
+        }
+
+        stage('Verify k8s') {
+            steps {
+                withKubeConfig(caCertificate: '', clusterName: 'do-nyc3-devops-cluster', contextName: '', credentialsId: 'k8-token', namespace: 'webapps', restrictKubeConfigAccess: false, serverUrl: 'https://f586c167-8b01-4eee-ada1-8c7ef0d46e6b.k8s.ondigitalocean.com') {
+                    sh "kubectl get pods -n webapps"
+                    sh "kubectl get services -n webapps"
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                def jobName = env.JOB_NAME
+                def buildNumber = env.BUILD_NUMBER
+                def pipelineStatus = currentBuild.result ?: 'UNKNOWN'
+                def bannerColor = pipelineStatus.toUpperCase() == 'SUCCESS' ? 'green' : 'red'
+                
+                def body = """
+                    <html>
+                    <body>
+                    <div style="border: 4px solid ${bannerColor}; padding: 10px;"
+                    <h2>${jobName} - Build ${buildNumber}</h2>
+                    <div style="background-color: ${bannerColor}; padding: 10px;"
+                    <h3 style="color: white;">Pipeline Status:
+                    ${pipelineStatus.toUpperCase() }</h3>
+                    </div>
+                    <p>Check the <a href="${BUILD_URL}">console output</a>.</p>
+                    </body>
+                    </html>
+                """
+                
+               emailext (
+                    subject: "${jobName} - Build ${buildNumber} - ${pipelineStatus.toUpperCase()}",
+                    body: body,
+                    to: 'abiegbeg@gmail.com',
+                    from: 'great@example.com',
+                    replyTo: 'great@example.com',
+                    mimeType: 'text/html',
+                    attachmentsPattern: 'trivy-image-report.html'
+                )
+            }
+        }
+    }
+}
